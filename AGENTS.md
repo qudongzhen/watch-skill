@@ -75,6 +75,7 @@ py -3.14 scripts/cleanup.py                              # 可再生成的中间
 py -3.14 scripts/cleanup.py --apply                      # 清 work/jobs / work/tmp / 快照 / analysis_v.txt（量以脚本输出为准）
 py -3.14 scripts/publish.py                              # 公开发布树：白名单出包 + 体积/敏感报告 + 远端漂移检查
 py -3.14 scripts/publish.py --push                       # 提交并推送；报告先看，远端漂移没清会拒绝（--force 才覆盖）
+py -3.14 scripts/publish_api.py --dry-run                # git 端点不通时改走 Git Data API（先 publish.py 出树，D28）
 ```
 
 ## 产物约定
@@ -133,6 +134,7 @@ notes/<id>/
 | 守卫 | 图版并入"引用了就不静默换"（新图落 `next/`）；BRIEF 加一行成本参照（图版 ≈222 / 全屏 ≈1224 token） | `docs/plan-grid-guard.md`、D26 |
 | 清理 | 白名单清理脚本（work/jobs、work/tmp、快照、`analysis_v.txt`）回收 664 MB；新增 `docs/PROJECT_MAP.md` | `docs/plan-cleanup.md`、`docs/PROJECT_MAP.md` |
 | 登录态 | `run.py --cookies`：只读副本、退出即删、不回写用户文件；开箱能拿 B 站 CC | `DECISIONS.md` D27 |
+| 发布 | 基线 + 漂移检查；git 端点不通时走 `scripts/publish_api.py`（Git Data API）；**强推≠删数据**，彻底清除只能删库重建 | `DECISIONS.md` D28 |
 
 ## 不要做的事
 
@@ -150,7 +152,7 @@ notes/<id>/
 - [ ] 八套 `test_*.py` 全绿（sharp / asrfix / meta / subs / hardsub / quote_check / check_docs / shared）
 - [ ] `git log --oneline | head -5` 有最近提交
 - [ ] 随便挑一篇 `notes/*/note.md`，跑 `note_audit` 能复现 0 FAIL
-- [ ] 读一遍 `DECISIONS.md` 的 D1–D27，知道哪些方案已被否决
+- [ ] 读一遍 `DECISIONS.md` 的 D1–D28，知道哪些方案已被否决
 - [ ] 工作区没有明显膨胀：`py -3.14 scripts/cleanup.py` 报的可回收量若超过 ~1 GB 就清一次（数字别写进文档，会过期）
 - [ ] 搬过工作区的话，先改 `vw.config.json` 的绝对路径
 - [ ] 待办与暂缓项在 `docs/TODO.md`（含"分支保护要先于给写权限"这类顺序陷阱），别重新推导

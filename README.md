@@ -194,7 +194,7 @@ exports/
 
 ```
 pipeline/     管道脚本（run / still / zoom / asrfix / doctor / check_docs + 写作契约 + 兼容层）
-scripts/      环境准备与维护（bootstrap / install_pydeps / cleanup / publish）
+scripts/      环境准备与维护（bootstrap / install_pydeps / cleanup / publish / publish_api）
 docs/         方案与评审记录（含被否决的方案，见 docs/README.md；PROJECT_MAP.md 是"谁吃什么、哪个文件能删"）
 examples/     格式样例（sample-note.md）
 vendor/       上游 video-watch 原样放置，不改代码（升级=重新跑 bootstrap --force）
