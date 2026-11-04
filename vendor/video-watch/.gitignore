@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+vw.config.json
+
+# 默认输出目录
+out/
+vw_out/
+vw_sheets/
+vw_gif/
+vw_grid/
+vw_seq/
+vw_read/
+vw_ocr/
+vw_plan/
+vw_report/
+
+# 测试产物
+_验证/

@@ -1,0 +1,43 @@
+watch-skill
+Copyright 2026 qudongzhen
+https://github.com/qudongzhen/watch-skill
+
+Licensed under the Apache License, Version 2.0 — see LICENSE.
+
+This file records third-party components and design references, as required by
+Section 4(d) of the Apache License. Keep it when you redistribute.
+
+--------------------------------------------------------------------------------
+1. video-watch — vendored, unmodified
+--------------------------------------------------------------------------------
+
+   Directory:  vendor/video-watch/
+   Upstream:   https://github.com/CFITCorporation/video-watch-skill
+   Copyright:  Copyright (c) 2026 CFITSec
+   License:    MIT — full text in vendor/video-watch/LICENSE
+
+   This product includes software developed at CFITCorporation/video-watch-skill.
+   The MIT license covers that directory only. It is not superseded by this
+   project's Apache-2.0 license, and its copyright and permission notices must
+   be preserved when redistributing.
+
+--------------------------------------------------------------------------------
+2. Design references — ideas only, no code included
+--------------------------------------------------------------------------------
+
+   SAOS-3624/dsh-video-storyboard (MIT)        取证决策层的设计思路
+   SAOS-3624/dsh-see-now          (Apache-2.0)  只读评估，未采用
+
+   What was taken, what was rejected and why: see docs/ref-review-*.md and
+   DECISIONS.md. No source code from either repository is included here.
+
+--------------------------------------------------------------------------------
+3. Runtime dependencies — installed separately, not distributed
+--------------------------------------------------------------------------------
+
+   ffmpeg / ffprobe、ImageMagick、yt-dlp、faster-whisper、PyAV、Pillow、
+   rapidocr-onnxruntime、opencc.
+
+   Each keeps its own license. This repository only calls them; it does not
+   bundle them. Use scripts/bootstrap.py and scripts/install_pydeps.py to
+   install your own copies.

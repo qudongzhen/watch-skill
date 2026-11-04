@@ -1,0 +1,16 @@
+# 运行时依赖（可选，按需装）。本项目把依赖装在 pydeps/，不用 site-packages：
+#   py -3.14 scripts/install_pydeps.py <包名>[==版本] ...
+#
+# 版本是 2026-11-03 在 Python 3.14 / Windows 上实测通过的组合；
+# PyAV 必须 <19（19 移除了 faster-whisper 依赖的流元数据接口）。
+#
+# 必需：yt-dlp（取源）、Pillow（选帧）
+# 可选：faster-whisper + av（转写）、rapidocr-onnxruntime（硬字幕，缺则回退 Windows 自带 OCR）、
+#       opencc（繁转简，缺则转写不做繁简转换）
+
+yt-dlp==2026.8.19
+Pillow==13.0.0
+faster-whisper==1.2.1
+av==18.1.0
+opencc-python-reimplemented==0.1.7
+rapidocr-onnxruntime==1.4.4
