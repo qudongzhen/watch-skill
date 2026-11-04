@@ -1,0 +1,27 @@
+# 依赖与产物：可重装、可重建，不入库
+tools/
+pydeps/
+work/
+
+# 成品笔记：一律不入库（本地留档即可）。这一条 2026-11-04 起覆盖 terms.json——
+# 原先"terms.json 要提交"的规矩已作废，见 AGENTS.md「不要做的事」。
+notes/
+
+# 凭据：任何 cookie/token 一律不入库（publish.py 另有内容扫描兜底）
+cookies*.txt
+*cookies.txt
+
+# 沙箱权限修复留下的恢复记录
+.acl-recovery/
+
+# 导出物（随时可重新生成）
+exports/
+
+# Python
+__pycache__/
+*.pyc
+
+# ---- 以下由 scripts/publish.py 追加，只出现在公开仓库里 ----
+# 成品笔记与素材不随仓库分发；本地配置含机器绝对路径，请复制 *.example.json
+notes/
+vw.config.json
