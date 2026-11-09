@@ -54,7 +54,7 @@ vw.config.json
 
 CHECKS = [
     ("绝对路径", re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/](?!n)"), "warn"),
-    ("用户目录/邮箱", re.compile(r"[\\/]Users[\\/][^\\/]|21690|@qq\.com"), "warn"),
+    ("用户目录/邮箱", re.compile(r"[\\/]Users[\\/][^\\/]|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "warn"),
     ("凭据", re.compile(
         r"gh[opsu]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-[A-Za-z0-9]{20,}"
         r"|SESSDATA=[A-Za-z0-9%]{10,}|bili_jct=[0-9a-f]{20,}|AKIA[0-9A-Z]{16}"), "fail"),
