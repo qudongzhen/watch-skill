@@ -6,10 +6,11 @@
 核心不是"让模型看视频"，而是**分工**：
 
 ```
-ffmpeg 逐帧量测（零 token） →  采样成几十帧图版（9 张图 ≈ 3100 token/条视频） →  模型看图 + 写笔记
+ffmpeg 逐帧量测（零 token） →  定位用图版 + 事件驱动取帧（几十张全屏帧） →  模型看图 + 写笔记
 ```
 
-一个 7 分钟视频，全程 LLM 只看 9 张图。这就是它比"逐帧喂多模态模型"便宜一到两个数量级的原因。
+一个 7 分钟视频，模型通常只看 **20–40 张**：1 张全片图版定位，其余是"冻结段 / 语音峰 / 切点首现 / 字幕变化"
+这些事件处的全屏帧，参数步骤再配一张裁切放大。这仍然比"逐帧喂多模态模型"便宜一到两个数量级。
 方法论来自 [`CFITCorporation/video-watch-skill`](https://github.com/CFITCorporation/video-watch-skill)，
 本仓库把它的取证能力接成了"链接进、笔记出"的管道。
 
@@ -19,13 +20,34 @@ ffmpeg 逐帧量测（零 token） →  采样成几十帧图版（9 张图 ≈ 
 > `pipeline/compat/` 都是按这台机器写的，Linux / macOS 需自行替换。
 > **许可**：Apache-2.0（见 [`LICENSE`](LICENSE)）；第三方来源与设计借鉴见 [`NOTICE`](NOTICE)。
 
+## 适用范围与现状
+
+**当前主攻：教程 / 录屏**（软件操作、参数讲解、代码演示）。这条管线不是"什么视频都能吃"，边界如下：
+
+| 维度 | 状态 |
+|---|---|
+| 素材类型 | 教程/录屏为主；口播讲座次之；剧情/评测只零星跑过 |
+| 时长 | 实测 5–40 分钟，20–40 分钟最佳 |
+| 画幅 / 编码 | 16:9 与 9:16 都跑过；1080p AV1 正常 |
+| 语言 | 中英原声都跑过（英文要 `--asr-lang en`，自动检测会把英文判成中文，见 D11） |
+| **B 站** | **已兼容并实测**：下载、分段、图版、转写、`?p=N&t=秒` 跳转全链路 |
+| **YouTube** | **只测过下载**（Shorts 1080×1920）；站点字幕、`&t=秒` 跳转、教程体全流程未验证 |
+| 其他站点 | 未支持：yt-dlp 能下，但字幕解析与跳转规则没适配 |
+| 硬字幕 | 教程体默认检测；命中就整片 OCR 到 `evidence/subtitles_ocr.md`，参数以字幕为准 |
+| 导出 | md / html / zip；**不做 docx**（需另装 pandoc，且 Word 的排版不可控） |
+| 运行环境 | Windows + Python 3.14 |
+
 ## 快速开始
 
 > 换人或换 AI 接手：先读 [`AGENTS.md`](AGENTS.md)（操作须知、禁区、交接清单），
 > 再跑 `py -3.14 pipeline/selfcheck.py` 确认工作区是好的。为什么这么做见 [`DECISIONS.md`](DECISIONS.md)。
 
 ```powershell
-# 0. 配置：复制一份，改成你机器上的 ffmpeg / ImageMagick / 字体路径（该文件不入库）
+# 0. 装环境：ffmpeg / ImageMagick 便携版 + Python 依赖（仓库不含 tools/ 与 pydeps/，新克隆必须先跑这两条）
+py -3.14 scripts/bootstrap.py
+py -3.14 scripts/install_pydeps.py yt-dlp faster-whisper "av==18.1.0" Pillow rapidocr-onnxruntime opencc-python-reimplemented
+
+# 0.5 配置：复制一份，改成你机器上的 ffmpeg / ImageMagick / 字体路径（该文件不入库）
 copy vw.config.example.json vw.config.json
 
 # 1. 自检（缺什么、怎么补，都会说）
@@ -56,8 +78,8 @@ notes/BV1Xdnc6jEbL/
 ├─ BRIEF.md           ← 任务书：图版清单、分段、定点截图、取证说明、硬规则
 ├─ research.json      ← 机器摘要：元信息 + 每格图版的时间映射 + 转写 + 截图挑选记录
 ├─ terms.json         ← 这一集的转写词表（可选）
-├─ assets/grids/      ← 图版：overview（5×5 全片）+ 每段一张（段长决定 3×3/4×4/5×5），都带 manifest.json
-├─ assets/stills/     ← 全屏定点截图：每段一张（作者停留的冻结帧）+ 手工补拍，代码/参数只能从这里读
+├─ assets/grids/      ← 图版（定位用）：overview 5×5 全片 + 每 10 分钟 1 张（教程体；口播体每段一张），都带 manifest.json
+├─ assets/stills/     ← 全屏定点截图：事件驱动候选（冻结/语音峰/关键词/切点）+ 手工补拍，代码/参数只能从这里读
 ├─ evidence/          ← timeline.json / shotlist.json / asr.json / transcript.md / transcript.fixed.md
 └─ source.mp4
 ```
@@ -70,6 +92,13 @@ notes/BV1Xdnc6jEbL/
 不随代码分发。
 
 ## 两条最容易踩的规则（完整四条见 `pipeline/NOTE_CONTRACT.md` §二）
+
+另外两条写作约定，验收器会查：
+
+- **每张图下面一行图注，按内容手写**（`*图 N：这张图证明了什么、该看哪几个数（mm:ss）*`）。
+  照抄 Alt、或写成"图 N：画面（时间）"会被判为机械图注。
+- **验收按 `note_schema` 分档**：新取证包（`research.json` 里 `note_schema >= 2`）查"开头结构 / 图注 / 图配跳转 / 裁切图成对 / 可读性"，
+  字数不设限；旧包沿用旧规则，不补不改。
 
 1. **图版里的文字一律不采信。** 上游项目实测过：3×3 图版里同一个时间码被"读"出九个不同值；
    还"读"出过一组画面上根本不存在的标题。分辨率不足时视觉不会报"读不到"，它会**渲染一个合理内容**。
@@ -119,13 +148,17 @@ exports/
 | `pipeline/run.py <url> --cookies cookies.txt` | 带登录态跑：B 站匿名字幕接口是关的，给 Netscape 格式的 cookies.txt（**放在仓库外**）才能拿到 CC。脚本复制成临时副本、退出即删，不回写原文件（D27） |
 | `pipeline/run.py <url> --asr-model small` | 换更大的 Whisper（更准、更慢，CPU 上约为 0.6× 实时） |
 | `pipeline/run.py <url> --max-sections 5` | 控制分段数（决定笔记章节粒度） |
-| `pipeline/run.py <url> --style tutorial` | 图文教程体例：每个分章自动抓一张全屏图（默认 8 张），写成"步骤"式笔记 |
-| `pipeline/run.py <url> --max-stills 5` | 手指定点截图张数（不给则教程 8 / 学习笔记 3） |
+| `pipeline/run.py <url> --style tutorial` | 图文教程体例：一步一件事，事件驱动抓全屏图，写成"步骤"式笔记 |
+| `pipeline/run.py <url> --max-stills auto` | 取图预算（默认 `auto` = 时长分钟×2，6–60 封顶；`0` = 不截断） |
+| `pipeline/run.py <url> --focus 6:23,10:21` | 手工指定必拍时刻（优先级最高，不受预算截断） |
+| `pipeline/run.py <url> --still-events freeze,speech,keyword,cut` | 取图事件源（默认四项全开；`ocr` 需先跑字幕 OCR） |
 | `pipeline/run.py <url> --pick exact` | 关掉选帧（默认 `auto`：在 ±0.25s 内三选一取最清晰，冻结帧不挑）。见 `DECISIONS.md` D14 |
 | `pipeline/run.py <url> --refresh-stills` | 重跑时覆盖**已被 note.md 引用**的定点截图（默认保留，避免成品笔记的图被悄悄换掉） |
 | `pipeline/run.py <url> --refresh-meta` | 重跑时覆盖**成品笔记的** `research.json` / `BRIEF.md`（默认改写成 `*.new` 并打印结构性差异） |
 | `pipeline/still.py <id> --at 12,95 --crop x,y,w,h --zoom 3` | 取单帧 / 裁切放大（读字唯一可信通道） |
 | `pipeline/still.py <id> --at 424 --pick sharp` | 该秒附近挑最清晰的一张（不会跨切点，会打印挪了多少） |
+| `pipeline/crop.py <id> --at 326` | 找候选裁切框（顶部参数条 / 右侧属性栏 / 底部字幕带），只报告不产图 |
+| `pipeline/crop.py <id> --at 326 --write` | 按候选 1 生成 `*_zoom1.png`（输出宽约 1400px、2–4×、高 ≤1000，按需生成不铺满） |
 | `pipeline/test_sharp.py` | 选帧模块的自检（手算 oracle + 亮度守卫 + e2e，26 项） |
 | `pipeline/asrfix.py <id>` | 转写后处理报告：词表能改几处、哪几句音量低到听不见、转写体检（不写回） |
 | `pipeline/asrfix.py <id> --write` | 写 `evidence/transcript.fixed.md` + `research.json.asr_meta`（**不动** `transcript.md` 原稿） |
@@ -134,12 +167,15 @@ exports/
 | `pipeline/hardsub.py <id> --detect` | 找画面里的硬字幕带（**实验性**：带会裁宽、混进相邻 UI 文字，见 D19） |
 | `pipeline/hardsub.py <id> --apply --limit 20` | 硬字幕 OCR 对照 ASR："原/改"两行逐条列出（引擎 rapidocr，缺则 Windows 自带；**只报告，不改转写**） |
 | `pipeline/hardsub.py <id> --apply --y0 900 --y1 1000` | 自动带不对时手动指定字幕带（原分辨率像素） |
+| `pipeline/hardsub.py <id> --subs-ocr` | 整片字幕 OCR → `evidence/subtitles_ocr.md`（参数、菜单名以字幕为准；约 3–8 分钟/20 分钟素材） |
+| `pipeline/hardsub.py <id> --subs-ocr --line top` | 字幕只有一行时指定读哪行（`auto` 默认按有没有中文选） |
 | `pipeline/test_hardsub.py` | 硬字幕自检（定位 + LCS 判据 + 去带外文字 + 引擎选择，30 项） |
 | `pipeline/quote_check.py <id>` | 引文出处体检：每条引文是「有出处 / 仅时刻 / 无出处」（不判真假，D20） |
 | `pipeline/test_quote_check.py` | 引文体检自检（抽取 + 分类 + 退出码，18 项） |
 | `pipeline/test_check_docs.py` | 文档体检器自检（命令段切分 + 开关归属 + 全库一致，10 项） |
 | `pipeline/test_shared.py` | 共享工具自检（时间戳/依赖/JSON 读写三件共享工具，35 项） |
-| `pipeline/test_meta.py` | 取证说明生成 / 重跑差异摘要的自检（16 项） |
+| `pipeline/test_notes.py` | 取图与验收自检（三道闸、`--focus`、跳转链接分平台、`note_schema` 分档，21 项） |
+| `pipeline/test_meta.py` | 取证说明生成 / 重跑差异摘要的自检（41 项） |
 | `pipeline/zoom.py <id> --at 613 --window 8` | 按需密集图版：8 秒 25 帧（0.33s/帧），某一步看不清时用 |
 | `pipeline/run.py <url> --no-auto-even` | 长片（>15min）切点 ≤3 个时默认自动等分；加这个保持按切点分 |
 | `pipeline/note_audit.py <id>` | 笔记验收：时间戳、图片存在、秒数可回溯、置信度段、占位符；有 FAIL 退出码为 1 |
@@ -158,22 +194,24 @@ exports/
 | 素材 | 笔记重心 | 默认档位 |
 |---|---|---|
 | 讲座 / 口播 | 论点与论证链 | 转写为主证据，图版定章节（`--style study`） |
-| 教程 / 录屏 | 可复现步骤 | 每段一张全屏 still + 图文教程体（`--style tutorial`，自动判定） |
+| 教程 / 录屏 | 可复现步骤 | 事件驱动全屏 still（一步至少一张）+ 图文教程体（`--style tutorial`，自动判定） |
 | 评测 / 产品 | 结论与依据 | 关键数字必须回原帧核对 |
 
 ### 教程类的图是怎么来的
 
-`--style tutorial`（或自动判定：冻结帧 ≥5 个）会为**每个分章抓一张全屏原帧**，取点优先用
-`probe` 测出的**冻结段**——作者停在某个界面上讲，那一帧本来就是给你看的。转写里明确提到
-"代码/脚本/节点"时也会补点。
+`--style tutorial`（或自动判定：冻结帧 ≥5 个）按**事件**取图，不是按段平均分：冻结段起点（作者停在
+界面上讲的那一帧）、语音密度峰、转写命中"代码/脚本/节点"、切点后 0.8 秒、以及字幕文本变化点。
+每段只保证"有图可看"，不强迫每段一张；预算按 `clamp(时长分钟×2, 6, 60)`，`--focus` 可以手工指定必拍时刻。
 
-判据是"静止画面 + 关键词"，**不是图像识别**：试过用边缘密度区分代码帧和游戏画面，
+判据是"静止画面 + 关键词 + 语音密度"，**不是图像识别**：试过用边缘密度区分代码帧和游戏画面，
 代码帧反而更低，判据不成立，没采用。所以自动选点**必须人工复核**——示例里
 `BV1EAKH6GE7C` 的第 7 段就抓到了 Loading 画面，改用补拍的 `pick_00420.png`。
 
+参数类步骤请用 `pipeline/crop.py` 另裁一张放大图（见命令参考），并在图下写按内容手写的图注。
+
 ## 已知限制
 
-- **采样盲区**：全片图版 25 帧，40 分钟就是每 96 秒一帧；段内图版虽然按段长加密到 12–25 秒一帧，
+- **采样盲区**：全片图版 25 帧，40 分钟就是每 96 秒一帧；教程体的分段图版已降级为"每 10 分钟 1 张"（上限 5），
   1–2 秒级的动作仍会漏。**要看清某一步，用 `pipeline/zoom.py <id> --at <秒> --window 8`**
   （8 秒 25 帧 = 0.33 秒/帧），不要指望粗看图版。
 - **转写质量**：**先试站点字幕**（B 站 CC 是作者原文，不错字、带时间码、还快）；拿不到才用 whisper。
@@ -193,7 +231,7 @@ exports/
 ## 目录约定
 
 ```
-pipeline/     管道脚本（run / still / zoom / asrfix / doctor / check_docs + 写作契约 + 兼容层）
+pipeline/     管道脚本（run / still / crop / zoom / asrfix / hardsub / quote_check / note_audit / finish / export / doctor / check_docs + 写作契约 + 兼容层）
 scripts/      环境准备与维护（bootstrap / install_pydeps / cleanup / publish / publish_api）
 docs/         方案与评审记录（含被否决的方案，见 docs/README.md；PROJECT_MAP.md 是"谁吃什么、哪个文件能删"）
 examples/     格式样例（sample-note.md）

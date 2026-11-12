@@ -34,14 +34,14 @@
 | 3 | 语音转写 + 词表校正 | 默认；`--no-asr` `--asr-lang` `--asr-model` | faster-whisper（默认 `base`）+ `asrfix.py`（繁转简 / 词表 / 体检） | D6 D11 D15 |
 | 4 | 逐帧量测（切点、冻结、静音、运动量） | 内部调用 | `vendor/video-watch/vw.py probe\|timeline` | D1 D9 |
 | 5 | 章节划分 | 默认按切点；`--max-sections` `--sections-mode even` `--no-auto-even` | `run.py` 分段计划（长片自动等分，按段长给格数） | D12 D16 |
-| 6 | 图版生成 + 时间映射 | 内部调用 | `vw.py sheet` + `run.py` 落 `assets/grids/*/manifest.json` | D2 D26 |
-| 7 | 选帧：±0.25s 内三选一取最清晰 | `--pick auto`（默认）/ `exact` | `sharp.py` `laplacian_var / candidates / pick_to`；冻结帧不挑、不跨切点 | D14 |
-| 8 | 定点截图与裁切放大 | `pipeline/still.py --at --crop --zoom --pick sharp` | `still.py` + `sharp.py`（读代码/参数/菜单名的唯一通道） | D5 D14 |
+| 6 | 图版生成 + 时间映射 | 内部调用 | `vw.py sheet` + `run.py` 落 `assets/grids/*/manifest.json`；**教程体降级为定位工具**（全片 1 + 每 10 分钟 1，上限 5） | D2 D26 D29 |
+| 7 | 取图：事件驱动 + 三道闸 | `--max-stills auto` / `--focus` / `--still-events` | `run.py` `pick_stills`：冻结段起点 / 语音密度峰 / 关键词 / 切点首现 / 字幕变化；5s 去重、每分钟 ≤3、预算 `clamp(分钟×2,6,60)` | D14 D29 |
+| 8 | 定点截图、裁切放大 | `pipeline/still.py --at --crop --zoom`；`pipeline/crop.py --at [--write] [--box]` | `still.py` + `crop.py`（投影找候选框：顶部参数条/右侧属性栏/字幕带；按需生成 `*_zoom1.png`） | D5 D14 |
 | 9 | 密集图版（0.33s/帧） | `pipeline/zoom.py --at <秒> --window <秒>` | `zoom.py` | D16 |
-| 10 | 硬字幕 OCR 对照 | `pipeline/hardsub.py --detect / --apply` | `hardsub.py` `band_from_densities / lcs_pairs / needs_fix`；rapidocr，缺则 Windows WinRT | D19 |
+| 10 | 硬字幕：定位 + 整片 OCR | `hardsub.py --detect / --apply / --subs-ocr`；`run.py --subs-ocr auto` 自动跑 | `hardsub.py` `band_from_densities / ocr_range / write_ocr_md`；rapidocr，缺则 Windows WinRT；双语字幕自动选中文行 | D19 D29 |
 | 11 | 引文出处体检 | `pipeline/quote_check.py <id>` | `quote_check.py` `extract / classify`（有出处 / 仅时刻 / 无出处） | D20 |
 | 12 | 写作契约 | `pipeline/NOTE_CONTRACT.md` | 人工阅读的规范，不是代码 | D7 D10 |
-| 13 | 机器验收 | `pipeline/note_audit.py`，或 `finish.py` 第一步 | `note_audit.py`：时间戳、图片存在、秒数可回溯、置信度段、占位符 | D7 |
+| 13 | 机器验收（按 `note_schema` 分档） | `pipeline/note_audit.py`，或 `finish.py` 第一步 | v2 包查：开头结构（标题/结论/来源）、步骤时间、图注数量与质量、图配跳转、裁切图成对、可读性；字数不设限 | D7 D29 |
 | 14 | 导出 md / html / zip | `pipeline/finish.py`（`--no-compact` 保原图） | `export.py`：图片内嵌、webp 压缩、按标题建目录 | D13 |
 | 15 | 重跑守卫（不静默换证据） | 默认开启 | `run.py` + `sharp.py`：截图 / 图版 / `research.json` / `BRIEF.md` / 转写 五处拦截 | D14 D17 D22 D26 |
 | 16 | 环境自检 | `pipeline/doctor.py` `selfcheck.py` `check_docs.py` | `deps.py` 单一口径（必需 / 可选只写一处） | D23 |
@@ -79,7 +79,7 @@
 ```powershell
 py -3.14 pipeline/doctor.py      # 依赖逐项：缺什么、怎么补
 py -3.14 pipeline/selfcheck.py   # 环境 + 脚本编译 + 文档一致性 + 既有笔记验收
-py -3.14 pipeline/test_sharp.py  # 以下八套是纯函数级自检
+py -3.14 pipeline/test_sharp.py  # 以下九套是纯函数级自检
 py -3.14 pipeline/test_asrfix.py
 py -3.14 pipeline/test_meta.py
 py -3.14 pipeline/test_subs.py
@@ -87,4 +87,5 @@ py -3.14 pipeline/test_hardsub.py
 py -3.14 pipeline/test_quote_check.py
 py -3.14 pipeline/test_check_docs.py
 py -3.14 pipeline/test_shared.py
+py -3.14 pipeline/test_notes.py   # 取图三道闸 + 验收分档（D29）
 ```

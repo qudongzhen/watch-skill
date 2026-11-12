@@ -40,7 +40,7 @@ Apache-2.0（见 `LICENSE`）。按第 5 条，你提交的贡献默认以同一
 
 ```powershell
 py -3.14 pipeline/selfcheck.py     # 环境 + 脚本编译 + 文档一致性 + 既有笔记验收
-py -3.14 pipeline/test_sharp.py    # 以下八套是纯函数级自检，不需要网络与素材
+py -3.14 pipeline/test_sharp.py    # 以下九套是纯函数级自检，不需要网络与素材
 py -3.14 pipeline/test_asrfix.py
 py -3.14 pipeline/test_meta.py
 py -3.14 pipeline/test_subs.py
@@ -48,6 +48,7 @@ py -3.14 pipeline/test_hardsub.py
 py -3.14 pipeline/test_quote_check.py
 py -3.14 pipeline/test_check_docs.py
 py -3.14 pipeline/test_shared.py
+py -3.14 pipeline/test_notes.py
 ```
 
 命名与风格没有硬性要求，但有两件事会让 PR 被打回：

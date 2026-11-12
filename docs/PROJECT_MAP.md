@@ -14,9 +14,9 @@ URL / 本地文件
    ├─ vw probe ...... ffmpeg 逐帧量测 → evidence/probe/{timeline.json, analysis_v.txt}
    ├─ vw plan ....... 切点/静音/冻结 → evidence/shotlist.json
    ├─ plan_sections . 切点派生 或 自动等分 → research.sections
-   ├─ vw grid ....... 全片 5×5 + 每段一张 → assets/grids/<dir>/{grid.png, manifest.json}
-   ├─ asr ........... 站点字幕优先，否则 whisper → evidence/asr/asr.json → transcript.md
-   ├─ pick_stills ... 冻结帧优先 + 关键词补充 → assets/stills/*.png（每张三选一取最清晰）
+   ├─ vw grid ....... 全片 5×5 + 定位图版（教程体每 10 分钟 1 张） → assets/grids/<dir>/{grid.png, manifest.json}
+   ├─ asr ........... 硬字幕 OCR 优先（教程体）/ 站点字幕 / whisper → evidence/{subtitles_ocr.md, asr/asr.json, transcript.md}
+   ├─ pick_stills ... 事件驱动（冻结/语音峰/关键词/切点/字幕）+ 三道闸 → assets/stills/*.png
    └─ write_brief ... BRIEF.md + research.json（note.md 已存在时改写 *.new）
           │
           ▼
@@ -48,9 +48,9 @@ URL / 本地文件
 | `timefmt.py` | — | `h:mm:ss` ↔ 秒（唯一实现） | `note_audit`、`quote_check`、`run` |
 | `check_docs.py` | `*.md` | 文档提到的脚本/开关是否真的存在 | `selfcheck` |
 | `ocr_win.ps1` | 图片 | WinRT OCR 结果（rapidocr 缺失时回退） | `hardsub` |
-| `test_*.py` ×8 | — | 255 项纯函数级断言 | 人（改完就跑） |
+| `test_*.py` ×9 | — | 293 项纯函数级断言 | 人（改完就跑） |
 
-`NOTE_CONTRACT.md` 不是脚本，是**写笔记的契约**（章节骨架、字数上限、引文格式）。
+`NOTE_CONTRACT.md` 不是脚本，是**写笔记的契约**（章节骨架、结构底线、图与跳转、引文格式）。
 
 ## 2. `notes/<id>/` 每个文件的寿命
 
@@ -94,11 +94,12 @@ URL / 本地文件
 | `test_sharp.py` | 26 | 清晰度评分语义、退化规则、不跨切点、守卫 |
 | `test_asrfix.py` | 33 | 繁简、词表语义（`terms.json` 覆盖全局）、静音一致性、体检 |
 | `test_meta.py` | 41 | 取证说明措辞、重跑差异、四类守卫（截图/图版/转写/元信息）、token 折算 |
-| `test_subs.py` | 62 | SRT/VTT 解析、合并、去滚动、语言挑选 |
+| `test_subs.py` | 79 | SRT/VTT 解析、合并、去滚动、语言挑选 |
 | `test_hardsub.py` | 30 | 字幕带定位、LCS 判据、OCR 引擎缺失时的行为 |
 | `test_quote_check.py` | 18 | 引文抽取、分级、CLI 退出码 |
 | `test_check_docs.py` | 10 | 命令段切分与开关归属（避免把 `yt-dlp --flag` 算成本项目的） |
 | `test_shared.py` | 35 | `timefmt` 解析、`deps` 探测口径 |
+| `test_notes.py` | 21 | 取图三道闸、`--focus`、`jump_url` 分平台、`note_schema` 分档 |
 
 `selfcheck.py` = 环境 9 + 结构 3 + 每篇笔记 1（跑 `note_audit`）。
 

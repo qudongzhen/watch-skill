@@ -15,10 +15,10 @@
 ```powershell
 py -3.14 pipeline/selfcheck.py        # 环境 + 脚本编译 + 文档一致性 + 既有笔记验收（实测约 1s；项数 = 9 环境 + 3 结构 + 每篇笔记 1）
 py -3.14 pipeline/doctor.py           # 依赖逐项自检，出问题先看它
-py -3.14 pipeline/test_sharp.py; py -3.14 pipeline/test_asrfix.py; py -3.14 pipeline/test_meta.py; py -3.14 pipeline/test_subs.py; py -3.14 pipeline/test_hardsub.py; py -3.14 pipeline/test_quote_check.py; py -3.14 pipeline/test_check_docs.py; py -3.14 pipeline/test_shared.py
+py -3.14 pipeline/test_sharp.py; py -3.14 pipeline/test_asrfix.py; py -3.14 pipeline/test_meta.py; py -3.14 pipeline/test_subs.py; py -3.14 pipeline/test_hardsub.py; py -3.14 pipeline/test_quote_check.py; py -3.14 pipeline/test_check_docs.py; py -3.14 pipeline/test_shared.py; py -3.14 pipeline/test_notes.py
 ```
 
-`selfcheck` 全绿再动手；红了就按它指的项修，不要跳过。八套 `test_*.py` 是纯函数级自检，
+`selfcheck` 全绿再动手；红了就按它指的项修，不要跳过。九套 `test_*.py` 是纯函数级自检，
 合计约 6 秒（`test_hardsub` 2.4s、`test_sharp` 1.4s 占大头，其余各 0.2s）。
 
 ## 环境事实（别重新探测，直接信）
@@ -32,6 +32,7 @@ py -3.14 pipeline/test_sharp.py; py -3.14 pipeline/test_asrfix.py; py -3.14 pipe
 | 上游技能 | `vendor/video-watch/`（**只读，不改**） |
 | OCR 引擎 | `pydeps/` 里的 rapidocr 1.4.4（+ onnxruntime 1.31）；没有时自动回退 `pipeline/ocr_win.ps1`（Windows 自带 WinRT，零安装） |
 | 配置 | `vw.config.json` 里是**绝对路径**；工作区一搬家就要改，否则 `grid` 报找不到 ImageMagick |
+| 适用范围 | **教程/录屏为主**；B 站全链路验证过，YouTube 只测过下载，其他站点未适配（详见 README「适用范围与现状」） |
 
 ## 这个沙箱的三个坑（已内置绕法，别拆）
 
@@ -62,11 +63,17 @@ py -3.14 pipeline/run.py "<url>" --refresh-stills        # 覆盖 note.md 已引
 py -3.14 pipeline/run.py "<url>" --refresh-meta          # 覆盖成品笔记的 research/BRIEF（D17）
 py -3.14 pipeline/still.py <id> --at 424 --crop 0,0,960,540 --zoom 2   # 补拍/读字
 py -3.14 pipeline/still.py <id> --at 424 --pick sharp    # 该秒附近挑最清晰的一帧
+py -3.14 pipeline/crop.py <id> --at 326                  # 找候选裁切框（参数条/面板），不加 --write 不产图
+py -3.14 pipeline/crop.py <id> --at 326 --write          # 按候选 1 生成 *_zoom1.png（按需，不默认铺满）
 py -3.14 pipeline/zoom.py <id> --at 613 --window 8       # 8 秒 25 帧（0.33s/帧），某一步看不清时用
 py -3.14 pipeline/asrfix.py <id>                         # 转写体检 + 词表会改几处（不写回）
 py -3.14 pipeline/asrfix.py <id> --write                 # 写 transcript.fixed.md + research.asr_meta
 py -3.14 pipeline/hardsub.py <id> --apply --limit 20     # 硬字幕 OCR 对照 ASR（只报告，见 D19）
+py -3.14 pipeline/hardsub.py <id> --subs-ocr             # 整片字幕 OCR → evidence/subtitles_ocr.md（参数以字幕为准）
 py -3.14 pipeline/hardsub.py <id> --apply --y0 900 --y1 1000   # 自动字幕带不对时手动指定（原分辨率像素）
+py -3.14 pipeline/run.py "<url>" --max-stills 0          # 不截断取图预算（默认 auto=时长×2，6–60 封顶）
+py -3.14 pipeline/run.py "<url>" --focus 6:23,10:21      # 手工指定必拍时刻（优先级最高）
+py -3.14 pipeline/run.py "<url>" --still-events freeze,speech,keyword,cut   # 取图事件源
 py -3.14 pipeline/quote_check.py <id>                    # 引文出处体检：有出处/仅时刻/无出处（D20）
 py -3.14 pipeline/note_audit.py <id>                     # 笔记验收，FAIL 必须清零
 py -3.14 pipeline/finish.py <id>                         # ★ 写完笔记只跑这一条：验收 → 导出
@@ -86,7 +93,7 @@ notes/<id>/
   BRIEF.md            任务书：图版清单、分段、定点截图、取证说明、硬规则
   terms.json          这一集的转写词表（可选，本地保留；覆盖 asr-terms.json 的同名键）
   research.json       机器摘要：时间映射、分段、转写、截图挑选记录、asr_meta
-  assets/grids/       5×5 全片 + 每段一张（段长 ≤150s→3×3，≤300s→4×4，更长 5×5）
+  assets/grids/       5×5 全片 + 每 10 分钟 1 张（教程体，上限 5）；口播体每段一张（段长 ≤150s→3×3，≤300s→4×4，更长 5×5）
   assets/grids/*/next/grid.png   被 note.md 引用的图版重跑时的"新图"落点（D26，可随时删）
   assets/stills/      全屏定点截图（代码/参数只能从这里读）
   evidence/           probe/timeline.json、shotlist.json、asr/asr.json、transcript.md、transcript.fixed.md
@@ -116,7 +123,7 @@ notes/<id>/
 
 - `pipeline/finish.py <id>`（= `note_audit` 验收 + 导出）**0 FAIL**；WARN 要能解释为什么留。
   只想看检查结果：`pipeline/note_audit.py <id>`。
-- 教程体额外要求：每个 `### 步骤 N｜mm:ss` 至少一张图。
+- 教程体建议每步一张图（验收里是 WARN，不是 FAIL）；**每张图必须有按内容写的图注**。
 - 自动选出的定点截图**必须人看一眼**：曾抓到过 Loading 画面（见 `DECISIONS.md` D5）。
 
 ## 最近几次改动的落点（读文档前先知道这个）
@@ -135,6 +142,7 @@ notes/<id>/
 | 清理 | 白名单清理脚本（work/jobs、work/tmp、快照、`analysis_v.txt`）回收 664 MB；新增 `docs/PROJECT_MAP.md` | `docs/plan-cleanup.md`、`docs/PROJECT_MAP.md` |
 | 登录态 | `run.py --cookies`：只读副本、退出即删、不回写用户文件；开箱能拿 B 站 CC | `DECISIONS.md` D27 |
 | 发布 | 基线 + 漂移检查；git 端点不通时走 `scripts/publish_api.py`（Git Data API）；**强推≠删数据**，彻底清除只能删库重建 | `DECISIONS.md` D28 |
+| 详细笔记 | 取图改**事件驱动**（冻结/语音峰/关键词/切点/字幕，三道闸 + 预算）；教程体默认**硬字幕整片 OCR**；验收按 `note_schema` 分档（结构底线替代字数上限）；图版降级为定位工具 | `docs/plan-note-detail.md`、D29 |
 
 ## 不要做的事
 
@@ -149,10 +157,10 @@ notes/<id>/
 ## 交接检查清单
 
 - [ ] `pipeline/selfcheck.py` 全绿（含"文档与代码"一项）
-- [ ] 八套 `test_*.py` 全绿（sharp / asrfix / meta / subs / hardsub / quote_check / check_docs / shared）
+- [ ] 九套 `test_*.py` 全绿（sharp / asrfix / meta / subs / hardsub / quote_check / check_docs / shared / notes）
 - [ ] `git log --oneline | head -5` 有最近提交
 - [ ] 随便挑一篇 `notes/*/note.md`，跑 `note_audit` 能复现 0 FAIL
-- [ ] 读一遍 `DECISIONS.md` 的 D1–D28，知道哪些方案已被否决
+- [ ] 读一遍 `DECISIONS.md` 的 D1–D29，知道哪些方案已被否决
 - [ ] 工作区没有明显膨胀：`py -3.14 scripts/cleanup.py` 报的可回收量若超过 ~1 GB 就清一次（数字别写进文档，会过期）
 - [ ] 搬过工作区的话，先改 `vw.config.json` 的绝对路径
 - [ ] 待办与暂缓项在 `docs/TODO.md`（含"分支保护要先于给写权限"这类顺序陷阱），别重新推导

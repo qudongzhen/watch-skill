@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pydeps"))  # 本进程也要能 import opencc 等（子进程另有 env()）
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # 同目录的 sharp.py
 import sharp  # noqa: E402  （必须在 pydeps 之后，sharp 自己要 import PIL）
+import hardsub  # noqa: E402  （硬字幕 OCR：教程体默认先定位再整片读）
 import asrfix  # noqa: E402
 import subs  # noqa: E402
 import timefmt  # noqa: E402  （时间戳只有一份实现）
@@ -138,6 +139,24 @@ def link_at(url: str, sec: float) -> str:
         return ""
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}t={int(sec)}"
+
+
+def jump_url(url: str, sec: float) -> str:
+    """按平台生成"跳到第 N 秒"的链接。
+
+    - B 站：沿用原 query（分 P 的 `?p=N` 已经在 url 里），追加 `&t=秒`；
+      url 里没有 `p` 时不擅自补，避免把多 P 视频跳到 P1（调用方在 BRIEF 里说明）。
+    - YouTube：`&t=秒`（两家都认 t=，写法一致）。
+    - 其他站点：`#t=秒`（HTML5 媒体片段的通用写法）。
+    """
+    if not url:
+        return ""
+    sec = int(sec)
+    host = url.split("/")[2].lower() if url.count("/") >= 2 else ""
+    if "bilibili.com" in host or "youtu" in host:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}t={sec}"
+    return f"{url.split('#')[0]}#t={sec}"
 
 
 # ---------------------------------------------------------------- 1. 抓取
@@ -575,55 +594,130 @@ def _score(text: str) -> tuple[int, list[str]]:
     return 2 * len(strong) + len(weak), strong + weak
 
 
+def _speech_gaps(timeline: dict) -> list[tuple[float, float]]:
+    """静音段的补集 = 正在说话的时间段（probe 免费给的）。"""
+    dur = float(timeline.get("duration") or 0)
+    spans: list[tuple[float, float]] = []
+    open_t: float | None = None
+    for ev in timeline.get("silences") or []:
+        t = float(ev.get("t") or 0)
+        if ev.get("kind") == "start":
+            open_t = t
+        elif open_t is not None:
+            spans.append((open_t, t))
+            open_t = None
+    if open_t is not None:
+        spans.append((open_t, dur))
+    # 取反：说话段
+    gaps, cursor = [], 0.0
+    for a, b in spans:
+        if a > cursor:
+            gaps.append((cursor, a))
+        cursor = max(cursor, b)
+    if cursor < dur:
+        gaps.append((cursor, dur))
+    return [(a, b) for a, b in gaps if b - a >= 3]
+
+
 def pick_stills(timeline: dict, sections: list[dict], asr_segs: list[dict] | None,
-                max_stills: int, style: str) -> list[dict]:
-    """给出「该截哪几帧」的候选。
+                budget: int, style: str, events: set[str] | None = None,
+                focus: list[float] | None = None,
+                ocr_segs: list[dict] | None = None) -> list[dict]:
+    """按「事件」给候选帧，**不再均匀分配**。
 
-    两个信号，按可靠度排序：
-    1. **冻结段**——作者停在某个界面上讲，那一帧本来就是给你看的（probe 免费测出来）；
-    2. **转写关键词**——明确说"代码/脚本/节点"的时刻，但 whisper 常把这些词听错，只当补充。
+    事件与优先级（高 → 低）：
+      9 手工指定（--focus）｜4 冻结段起点（作者停在界面上讲）｜3 强关键词｜2 弱关键词 /
+      语音密度峰（段内最长说话段的中点）｜1 切点后 0.8s（新界面首现）
 
-    不做画面识别：边缘密度试过，代码帧并不比游戏画面高，判据不成立。
+    三道闸，防止密切口素材爆图：
+      ① 相邻候选间隔 < 5s 只留优先级最高的一张；
+      ② 任一 60s 窗口最多 3 张；
+      ③ 总数不超过 budget（0 = 不截断）。
+
+    不做画面识别：边缘密度试过，代码帧并不比游戏画面高，判据不成立（D5）。
     """
-    freeze = [float(x) for x in (timeline.get("freezes") or [])]
-    picks: list[dict] = []
+    events = set(events or {"freeze", "speech", "keyword", "cut"})
+    cuts = cut_times(timeline)
+    freezes = [float(x) for x in (timeline.get("freezes") or [])]
+    dur = float(timeline.get("duration") or 0)
+    raw: list[dict] = []
 
-    for s in sections:
-        inside = [f for f in freeze if s["t0"] + 2 <= f <= s["t1"] - 1]
-        mid = (s["t0"] + s["t1"]) / 2
-        if inside:
-            t = min(inside, key=lambda f: abs(f - mid))
-            reason = "冻结帧（作者停留处）"
-        else:
-            t = mid
-            reason = "段中点（本段无冻结帧）"
-        picks.append({"t": round(t, 2), "section": s["idx"], "reason": reason,
-                      "hits": [], "text": ""})
+    def push(t: float, prio: int, reason: str, hits: list[str] | None = None,
+             text: str = "") -> None:
+        if 0 <= t <= max(dur - 0.2, 0.2):
+            raw.append({"t": round(t, 2), "prio": prio, "reason": reason,
+                        "hits": hits or [], "text": text})
 
-    # 关键词命中：若落在某段内，直接把该段的取图时刻挪过去
-    if asr_segs:
-        cands = []
+    if "freeze" in events:
+        for f in freezes:
+            push(f + 0.4, 4, "冻结段起点（作者停留处）")
+
+    if "keyword" in events and asr_segs:
         for seg in asr_segs:
             sc, hits = _score(seg["text"])
             if sc >= 2:
-                cands.append({"t": seg["start"], "score": sc, "hits": hits, "text": seg["text"]})
-        for c in cands:
-            for p in picks:
-                sec = next((s for s in sections if s["idx"] == p["section"]), None)
-                if sec and sec["t0"] <= c["t"] <= sec["t1"]:
-                    if c["score"] >= 3:  # 强命中才覆盖，避免被口语词劫持
-                        p.update(t=round(c["t"], 2), reason="转写命中代码/界面",
-                                 hits=c["hits"], text=c["text"])
-                    break
-            else:
-                picks.append({"t": round(c["t"], 2), "section": None,
-                              "reason": "转写命中代码/界面", "hits": c["hits"], "text": c["text"]})
+                push(seg["start"], 3 if sc >= 3 else 2, "转写命中代码/界面", hits, seg["text"])
 
-    picks.sort(key=lambda p: p["t"])
-    # study 体例只取 3 张：均匀铺开；tutorial 每段一张
-    if len(picks) > max_stills:
-        step = len(picks) / max_stills
-        picks = [picks[int(i * step)] for i in range(max_stills)]
+    if "speech" in events:
+        gaps = _speech_gaps(timeline)
+        for s in sections:
+            inside = [(a, b) for a, b in gaps if s["t0"] <= a and b <= s["t1"]]
+            if not inside:
+                continue
+            a, b = max(inside, key=lambda ab: ab[1] - ab[0])
+            if b - a >= 8:                      # 太短的一段不算"讲得密"
+                push((a + b) / 2, 2, "语音密度峰（讲话最长段）")
+
+    if "ocr" in events and ocr_segs:
+        for seg in ocr_segs:
+            txt = (seg.get("text") or "").strip()
+            if len(txt) >= 6:                    # 太短的多半是 UI 残片
+                push(float(seg["start"]), 2, "字幕文本变化", [], txt)
+
+    if "cut" in events:
+        for c in cuts:
+            push(c + 0.8, 1, "切点后新界面")
+
+    for t in focus or []:
+        push(float(t), 9, "手工指定（--focus）")
+
+    # 闸①：按优先级保留，5 秒内的重复丢掉
+    raw.sort(key=lambda c: (-c["prio"], c["t"]))
+    kept: list[dict] = []
+    for c in raw:
+        if all(abs(c["t"] - k["t"]) >= 5.0 for k in kept):
+            kept.append(c)
+
+    # 闸②：任一 60 秒窗口最多 3 张
+    kept.sort(key=lambda c: (-c["prio"], c["t"]))
+    limited: list[dict] = []
+    for c in kept:
+        win = [k for k in limited if abs(k["t"] - c["t"]) < 60]
+        if len(win) < 3:
+            limited.append(c)
+
+    # 闸③：总预算（0 = 不截断）。按时间分层取，每层留优先级最高的一张——
+    # 直接按优先级砍会把后半段全砍掉（实测 41 张预算只覆盖到前 14 分钟）。
+    limited.sort(key=lambda c: c["t"])
+    if budget and len(limited) > budget:
+        span_total = max(dur, 1e-6)
+        buckets: dict[int, dict] = {}
+        for c in limited:
+            k = min(budget - 1, int(c["t"] / span_total * budget))
+            cur = buckets.get(k)
+            if cur is None or c["prio"] > cur["prio"]:
+                buckets[k] = c
+        limited = sorted(buckets.values(), key=lambda c: c["t"])
+
+    # 归属到段：落在哪段算哪段；落在段之外的按"最近的段"
+    picks = []
+    for c in limited:
+        sec = next((s for s in sections if s["t0"] <= c["t"] <= s["t1"]), None)
+        if sec is None and sections:
+            sec = min(sections, key=lambda s: min(abs(c["t"] - s["t0"]), abs(c["t"] - s["t1"])))
+        picks.append({"t": c["t"], "section": sec["idx"] if sec else None,
+                      "reason": c["reason"], "hits": c["hits"], "text": c["text"],
+                      "prio": c["prio"]})
     return picks
 
 
@@ -862,6 +956,10 @@ def write_brief(note_dir: Path, meta: dict, timeline: dict, images: list[dict],
     hint = token_hint(images)
     if hint:
         lines += ["", f"成本参考：{hint}"]
+    if asr_meta and asr_meta.get("hardsub_ocr"):
+        ho = asr_meta["hardsub_ocr"]
+        lines += ["", f"⚠️ **检测到硬字幕**：`{ho.get('file')}`（{ho.get('segments')} 段）。"
+                      "参数、菜单名、代码**以字幕原文为准**；句子仍以转写为主，冲突时以字幕为证据。"]
     lines += ["", "## 分段（建议的笔记章节骨架）", ""]
     for s in sections:
         mm, ss = divmod(int(s["t0"]), 60)
@@ -902,7 +1000,13 @@ def write_brief(note_dir: Path, meta: dict, timeline: dict, images: list[dict],
         lines += ["", "## 语音转写：未生成", ""]
 
     if stills:
-        lines += ["", "## 定点截图（全屏原分辨率，写教程时逐张看）", ""]
+        url = meta.get("webpage_url", "") or ""
+        suggest = max(6, min(60, int(math.ceil(dur / 60 * 2))))
+        need = max(0, suggest - len(stills))
+        lines += ["", f"## 定点截图：事件驱动候选 {len(stills)} 张", ""]
+        if need:
+            lines.append(f"- 按 {suggest} 张的目标（时长×2，6–60 封顶），**建议再补拍 {need} 张**："
+                         f"用 `py -3.14 pipeline/still.py {note_dir.name} --at <秒>`")
         for s in stills:
             tag = f"第{s['section']}段" if s.get("section") else "段外"
             p = s.get("pick") or {}
@@ -913,7 +1017,8 @@ def write_brief(note_dir: Path, meta: dict, timeline: dict, images: list[dict],
                 extra = f"　（{len(cands)} 帧里取第 {k} 帧，{p['t'] - p['asked_t']:+.2f}s）"
             elif p.get("mode") == "kept":
                 extra = "　（成品笔记已引用，本次未覆盖）"
-            lines.append(f"- `{s['image']}`　{stamp(s['t'])}　{tag}　{s['reason']}{extra}")
+            jump = f"　[跳转]({jump_url(url, s['t'])})" if url else ""
+            lines.append(f"- `{s['image']}`　{stamp(s['t'])}　{tag}　{s['reason']}{extra}{jump}")
             if s.get("text"):
                 lines.append(f"  > 转写：{s['text']}")
         lines += ["", "  这些是全屏原帧。**要抄的代码、参数、菜单名必须看它们**——"
@@ -983,8 +1088,17 @@ def main() -> int:
                          "B 站匿名字幕接口是关的，要 CC 就得给。脚本复制成临时副本再用，退出即删")
     ap.add_argument("--style", choices=["auto", "study", "tutorial"], default="auto",
                     help="写作体例：auto 按是否命中代码/界面自动选；tutorial 走图文教程模板")
-    ap.add_argument("--max-stills", type=int, default=None,
-                    help="定点截图张数（默认：教程 8 张/每段一张，学习笔记 3 张）")
+    ap.add_argument("--max-stills", default="auto",
+                    help="定点截图预算：auto=按 clamp(时长分钟×2, 6, 60) 算（默认）；0=不截断；"
+                         "给整数则按该数封顶")
+    ap.add_argument("--still-events", default="freeze,speech,keyword,cut",
+                    help="取图事件源，逗号分隔：freeze / speech / keyword / cut / ocr")
+    ap.add_argument("--subs-ocr", choices=["auto", "off", "on"], default="auto",
+                    help="硬字幕整片 OCR：auto=教程体检测到字幕带就跑（3–8 分钟）；off=不跑")
+    ap.add_argument("--focus", default="",
+                    help="手工指定必拍时刻（mm:ss 逗号分隔，如 6:23,10:21），优先级最高")
+    ap.add_argument("--target-section-len", type=float, default=90.0,
+                    help="教程体分段目标段长（秒），只在 sections-mode=cut 时作为合并目标")
     ap.add_argument("--pick", choices=["auto", "sharp", "exact"], default="auto",
                     help="定点截图选帧：auto=冻结帧原样取、其余在 ±window 内挑最清晰（默认）；"
                          "sharp=一律挑；exact=不挑（与旧版完全一致）")
@@ -1054,7 +1168,17 @@ def main() -> int:
 
     sections = plan_sections(timeline, args.max_sections, args.sections_mode,
                              auto_even=not args.no_auto_even)
-    for s in sections:
+    # 图版降级（2026-11-11）：教程/录屏只当"定位工具"，每 10 分钟一张、上限 5 张；
+    # 口播/观点类画面同质，图版仍是"替代看片"的主力，保持每段一张。
+    if args.style == "study":
+        grid_sections = sections
+    else:
+        grid_sections, mark = [], 0.0
+        for s in sections:
+            if s["t0"] >= mark and len(grid_sections) < 5:
+                grid_sections.append(s)
+                mark = s["t0"] + 600
+    for s in grid_sections:
         # 格数按段长给：图是"按张"计 token 的（3×3 与 5×5 同价），加格子不花钱，加图才花钱。
         # 分档让段内采样间隔落在 ~20s 以内；小字本来就不采信（契约 §二）。
         span = s["t1"] - s["t0"]
@@ -1094,14 +1218,65 @@ def main() -> int:
             shutil.copy2(sub_path, sub_dir / sub_path.name)
             print(f"[asr] 原始字幕已归档：evidence/subtitles/{sub_path.name}", flush=True)
 
-    # 代码 / 界面定点截图：冻结帧优先（作者停留处），转写关键词补充
+    # 代码 / 界面定点截图：事件驱动（冻结帧 / 语音峰 / 关键词 / 切点首现），不再均匀分配
     kw_hits = sum(1 for s in (asr_segs or []) if _score(s["text"])[0] >= 3)
     freezes = timeline.get("freezes") or []
     style = args.style
     if style == "auto":
         # 静止画面多 = 作者反复停在某个界面上讲 = 教程/演示范畴
         style = "tutorial" if (len(freezes) >= 5 or kw_hits >= 2) else "study"
-    max_stills = args.max_stills or (8 if style == "tutorial" else 3)
+
+    # 硬字幕：教程体默认先定位再整片 OCR —— 参数与菜单名以字幕原文为准（比 ASR 准）
+    ocr_segs: list[dict] = []
+    ocr_meta: dict = {}
+    if args.subs_ocr != "off" and style == "tutorial":
+        try:
+            info = hardsub.detect(target_media, dur, hardsub.DEFAULT_FRAMES)
+            if info.get("found"):
+                fake = {"timeline": {"height": timeline["info"]["height"],
+                                     "width": timeline["info"]["width"]}}
+                y0, y1, _w, fh = hardsub.band_pixels(info, fake)
+                # 顶部 1/4 的"文字带"多半是播放器叠加层（B 站标题栏/UP 名），不是字幕
+                if fh and (y0 + y1) / 2 < fh * 0.25:
+                    print(f"[subs] 检测到的带在画面顶部 y={y0}–{y1}，疑似播放器 UI 叠加，"
+                          "跳过 OCR（要强制跑：hardsub.py --subs-ocr --y0/--y1）", flush=True)
+                    raise StopIteration
+                h = y1 - y0
+                y1 = min(fh, y1 + h)          # 双语字幕：向下补一行
+                print(f"[subs] 检测到硬字幕 y={y0}–{y1}，整片 OCR（约 "
+                      f"{int(dur / 2)} 帧，3–8 分钟）…", flush=True)
+                segs, nf = hardsub.ocr_range(target_media, y0, y1, 2.0, dur)
+                if segs:
+                    path = hardsub.write_ocr_md(note_dir, y0, y1, 2.0, segs, nf)
+                    ocr_segs = segs
+                    ocr_meta = {"band": [y0, y1], "step": 2.0, "frames": nf,
+                                "segments": len(segs),
+                                "file": str(path.relative_to(note_dir)).replace("\\", "/")}
+                    print(f"[subs] {len(segs)} 段字幕 → {ocr_meta['file']}", flush=True)
+            else:
+                print("[subs] 没检测到硬字幕，转写以 ASR 为准", flush=True)
+        except StopIteration:
+            pass
+        except Exception as exc:                       # 引擎缺失/抽帧失败都不该死在这里
+            print(f"[subs] 跳过硬字幕 OCR：{exc}", flush=True)
+
+    # 预算：auto 按"时长分钟×2"给，clamp 到 6–60；0 = 不截断；整数 = 封顶
+    raw_stills = str(args.max_stills).strip().lower()
+    if raw_stills in {"auto", "", "none"}:
+        budget = max(6, min(60, int(math.ceil(dur / 60 * 2))))
+    elif raw_stills in {"0", "all"}:
+        budget = 0
+    else:
+        budget = int(raw_stills)
+    events = {e.strip() for e in str(args.still_events).split(",") if e.strip()}
+    if ocr_segs:
+        events.add("ocr")                  # 有字幕文本变化点，就多一类取图事件
+    focus_times: list[float] = []
+    if args.focus:
+        for part in str(args.focus).split(","):
+            focus_times += [float(x) for x in timefmt.parse_stamps(part)]
+    if style == "study" and not focus_times:
+        budget = min(budget or 3, 3)          # 学习笔记仍只取少量
 
     stills: list[dict] = []
     if asr_segs or style == "tutorial":
@@ -1109,7 +1284,11 @@ def main() -> int:
         fps = float(timeline["info"].get("fps") or 25.0)
         all_cuts = cut_times(timeline)
         by_idx = {s["idx"]: s for s in sections}
-        for i, s in enumerate(pick_stills(timeline, sections, asr_segs, max_stills, style), 1):
+        picks = pick_stills(timeline, sections, asr_segs, budget, style,
+                            events=events, focus=focus_times, ocr_segs=ocr_segs)
+        print(f"[still] 事件 {len(picks)} 张（预算 {budget or '不截断'}，事件源 "
+              f"{'/'.join(sorted(events))}）", flush=True)
+        for i, s in enumerate(picks, 1):
             stem = (f"s{s['section']:02d}_{int(s['t']):05d}" if s.get("section")
                     else f"kw_{i:02d}_{int(s['t']):05d}")
             path = still_dir / f"{stem}.png"
@@ -1153,6 +1332,7 @@ def main() -> int:
         asr_segs, asr_meta = postprocess_asr(asr_segs, timeline, dur, note_dir, asr_meta)
 
     research = {
+        "note_schema": 2,          # 验收规则版本：>=2 走"结构底线 + 图配跳转"的新口径
         "meta": meta, "slug": slug,
         "timeline": {
             "duration": dur, "content_kind": timeline.get("content_kind"),
@@ -1168,7 +1348,7 @@ def main() -> int:
         "stills": stills,
         "style": style,
         "asr": asr_segs,
-        "asr_meta": asr_meta,
+        "asr_meta": {**(asr_meta or {}), **({"hardsub_ocr": ocr_meta} if ocr_meta else {})},
         "elapsed_s": round(time.time() - t_start, 1),
     }
     # 成品笔记已经存在时：不覆盖它的取证包，改写 .new 并报差异。

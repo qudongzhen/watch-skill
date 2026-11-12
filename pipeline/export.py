@@ -104,11 +104,45 @@ def write_html(note: Path, imgs, dest: Path, compact: bool) -> Path:
         raise SystemExit("html 需要 python-markdown：py -3.14 scripts/install_pydeps.py markdown")
     body = markdown.markdown(inline(note.read_text(encoding="utf-8"), imgs, compact),
                              extensions=["tables", "fenced_code", "toc"])
+    lightbox = (
+        "<div id='lb'><img id='lbimg' alt=''></div>"
+        "<script>(function(){"
+        "var lb=document.getElementById('lb'),im=document.getElementById('lbimg');"
+        "var s=1,tx=0,ty=0,drag=false,moved=false,px=0,py=0,ox=0,oy=0;"
+        "function paint(){im.style.transform='translate('+tx+'px,'+ty+'px) scale('+s+')';}"
+        "function reset(){s=1;tx=0;ty=0;paint();}"
+        "function open(src){im.src=src;reset();lb.classList.add('on');"
+        "document.documentElement.style.overflow='hidden';}"
+        "function close(){lb.classList.remove('on');document.documentElement.style.overflow='';}"
+        "document.querySelectorAll('body img').forEach(function(el){"
+        "if(el.id==='lbimg')return;el.style.cursor='zoom-in';"
+        "el.addEventListener('click',function(){open(el.src)})});"
+        "lb.addEventListener('click',function(){if(!moved)close();moved=false;});"
+        "lb.addEventListener('wheel',function(e){e.preventDefault();"
+        "var k=e.deltaY<0?1.15:1/1.15,n=Math.min(8,Math.max(1,s*k));"
+        "if(n!==s){s=n;paint();}},{passive:false});"
+        "lb.addEventListener('pointerdown',function(e){drag=true;moved=false;"
+        "px=e.clientX;py=e.clientY;ox=tx;oy=ty;});"
+        "lb.addEventListener('pointermove',function(e){if(!drag)return;"
+        "var dx=e.clientX-px,dy=e.clientY-py;if(Math.abs(dx)+Math.abs(dy)>4)moved=true;"
+        "tx=ox+dx;ty=oy+dy;paint();});"
+        "lb.addEventListener('pointerup',function(){drag=false;});"
+        "document.addEventListener('keydown',function(e){if(e.key==='Escape')close()});"
+        "})()</script>")
     dest.write_text(
         "<!doctype html><meta charset='utf-8'><title>" + title_of(note) + "</title><style>"
         "body{max-width:860px;margin:40px auto;padding:0 20px;"
         "font:16px/1.75 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;color:#222}"
-        "img{max-width:100%;border:1px solid #e3e3e3;border-radius:6px;margin:10px 0}"
+        "img{max-width:100%;border:1px solid #e3e3e3;border-radius:6px;margin:10px 0;display:block}"
+        "#lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.86);z-index:99;"
+        "align-items:center;justify-content:center;padding:24px;cursor:zoom-out;"
+        "overflow:hidden;touch-action:none}"
+        "#lb.on{display:flex}"
+        "#lb img{max-width:96vw;max-height:92vh;width:auto;border:none;border-radius:4px;"
+        "background:#fff;box-shadow:0 10px 40px rgba(0,0,0,.6);"
+        "transform-origin:center center;will-change:transform;user-select:none}"
+        "p>em:only-child{display:block;font-size:.86em;color:#666;"
+        "text-align:center;margin:-4px 0 16px}"
         "code{background:#f5f5f5;padding:2px 5px;border-radius:3px;font-size:.9em}"
         "pre{background:#f7f7f7;padding:12px;border-radius:6px;overflow:auto}"
         "pre code{background:none;padding:0}"
@@ -116,7 +150,7 @@ def write_html(note: Path, imgs, dest: Path, compact: bool) -> Path:
         "th,td{border:1px solid #ddd;padding:6px 10px;text-align:left}"
         "blockquote{border-left:3px solid #d0d0d0;margin:12px 0;padding:2px 14px;color:#555}"
         "h1{border-bottom:1px solid #eee;padding-bottom:8px}"
-        "</style>" + body, encoding="utf-8")
+        "</style>" + body + lightbox, encoding="utf-8")
     return dest
 
 

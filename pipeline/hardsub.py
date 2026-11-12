@@ -454,6 +454,161 @@ def cmd_apply(args) -> int:
     return 0
 
 
+def _trim_subtitle(text: str) -> str:
+    """从字幕带里剔掉混进来的界面文字。
+
+    常见两类：Blender 底部状态栏（`Collection|Cube|Verts:8|…|4.0.0 Alpha`）和时间轴标尺的
+    孤立整数（`70 80 90 100`）。字幕里的参数（`0.01`、`0.052 m`）带小数点或单位，不会被误删。
+    """
+    t = re.sub(r"\b(?:Collection|Verts|Faces|Edges|Tris|Objects?|MiB|VRAM|Scene|ViewLayer)\b.*$",
+               "", text, flags=re.I)
+    t = re.sub(r"(?:\b\d{1,3}\b\s*){2,}", " ", t)     # 连续孤立整数 = 时间轴标尺
+    t = re.sub(r"^\d{1,3}\s+(?=[\u4e00-\u9fff])", "", t)   # 行首单个标尺数字
+    t = re.sub(r"\b[tT]\.?\s*Menu\b.*$", "", t)       # 状态栏残片
+    t = re.sub(r"\s*\b[a-zA-Z]{0,3}Menu\b.*$", "", t)   # 同上（"xtMenu" 这种粘连）
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.strip(" |·")
+
+
+def ocr_range(media: Path, y0: int, y1: int, step: float, span: float,
+              line: str = "auto") -> tuple[list[dict], int]:
+    """对 [y0,y1] 这条带做整片 OCR，返回 (时间段列表, 抽帧数)。
+
+    抽一次帧（两行高），按中线切上下半，探测哪半有中文就整片读那半；
+    相同文本用"去掉空格标点"比较，避免同一句重复成两段。run.py 直接调它，
+    这样教程体例可以"先 OCR 再取图"。
+    """
+    tmp = ROOT / "work" / "tmp" / "subs_ocr"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    band_h = max(2, y1 - y0)
+    total_h = band_h * 2
+    cmd = [str(sharp.FFMPEG), "-hide_banner", "-loglevel", "error", "-y",
+           "-t", f"{span:.2f}", "-i", str(media),
+           "-vf", f"fps=1/{step},crop=iw:{total_h}:0:{y0}",
+           "-start_number", "0", str(tmp / "f%05d.png")]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        raise RuntimeError(f"抽帧失败：{(r.stderr or '').strip()[:200]}")
+
+    frames = sorted(tmp.glob("f*.png"))
+
+    def half(path: Path, idx: int) -> Path:
+        from PIL import Image
+        img = Image.open(path)
+        box = (0, idx * band_h, img.width, (idx + 1) * band_h)
+        out = path.with_name(path.stem + f"_{idx}.png")
+        img.crop(box).save(out)
+        return out
+
+    def cjk(s: str) -> int:
+        return sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+
+    pick_row = 0
+    if line == "bottom":
+        pick_row = 1
+    elif line == "auto":
+        probe = frames[:: max(1, len(frames) // 5)][:5] or frames[:1]
+        scores = [0, 0]
+        for p in probe:
+            for idx in (0, 1):
+                scores[idx] += cjk(normalize_ocr(ocr_band(half(p, idx))))
+        pick_row = 1 if scores[1] > scores[0] else 0
+
+    def norm(s: str) -> str:
+        return re.sub(r"[\s，。,.!?！？]+", "", s).lower()
+
+    segs: list[dict] = []
+    last, prev_t = "", 0.0
+    try:
+        for i, path in enumerate(frames):
+            t = i * step
+            text = _trim_subtitle(normalize_ocr(ocr_band(half(path, pick_row))))
+            if not text:
+                continue
+            if norm(text) != norm(last):
+                if last:
+                    segs.append({"start": round(prev_t, 2), "end": round(t, 2), "text": last})
+                last, prev_t = text, t
+        if last:
+            segs.append({"start": round(prev_t, 2), "end": round(min(span, t + step), 2),
+                         "text": last})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return segs, len(frames)
+
+
+def write_ocr_md(note: Path, y0: int, y1: int, step: float,
+                 segs: list[dict], frames: int) -> Path:
+    out = note / "evidence" / "subtitles_ocr.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# 硬字幕 OCR（机器输出，未校对）", "",
+             f"> 字幕带 y={y0}–{y1}，步长 {step}s，共 {frames} 帧、{len(segs)} 段。",
+             "> 用途：参数、菜单名、代码以这里为准（比 ASR 准）；句子仍以转写为主。", ""]
+    for s in segs:
+        mm, ss = divmod(int(s["start"]), 60)
+        lines.append(f"- `{mm:02d}:{ss:02d}`　{s['text']}")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
+
+
+def cmd_subs_ocr(args) -> int:
+    """整片字幕带 OCR：按固定步长抽帧、逐帧读带内文字，压成"时间段 → 原文"。
+
+    产出 `evidence/subtitles_ocr.md`（写作者的参数/菜单名以此为准），并把摘要写进
+    `research.asr_meta.hardsub_ocr`。**不改转写文件**：转写与字幕并列，由写作者取舍。
+    """
+    note, media, dur, research = load_note(args.slug)
+    try:
+        kind, _ = engine()
+    except OcrUnavailable as exc:
+        print(f"  {exc}", file=sys.stderr)
+        print("  （定位仍可用：加 --detect）", file=sys.stderr)
+        return 2
+
+    if (args.y0 is None) != (args.y1 is None):
+        print("  --y0/--y1 要一起给", file=sys.stderr)
+        return 2
+    if args.y0 is not None and args.y1 is not None:
+        y0, y1 = args.y0, args.y1
+        print(f"  使用指定字幕带 y={y0}–{y1}")
+    else:
+        info = detect(media, dur, args.frames)
+        if not info["found"]:
+            print("  没找到字幕带，无从 OCR；可以用 --y0/--y1 手动指定")
+            return 1
+        y0, y1, _fw, fh = band_pixels(info, research)
+        # 双语字幕常常两行：密度带只认到最密的一行，向下补一格高度把第二行也圈进来
+        h = y1 - y0
+        y1 = min(fh or 10 ** 9, y1 + h)
+        print(f"  自动定位字幕带 y={y0}–{y1}（已向下扩 {h}px 覆盖双语第二行）")
+
+    step = max(0.5, float(args.step))
+    span = min(dur, float(args.max_secs)) if args.max_secs else dur
+    print(f"  OCR 引擎：{'rapidocr' if kind == 'rapidocr' else 'Windows 自带（WinRT）'}；"
+          f"步长 {step}s，覆盖 0–{span:.0f}s（约 {int(span / step)} 帧）", flush=True)
+
+    try:
+        segs, nframes = ocr_range(media, y0, y1, step, span, args.line)
+    except RuntimeError as exc:
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+
+    if not segs:
+        print("  OCR 没有读到文字（带裁错了？先用 --detect 看一眼）")
+        return 1
+
+    out = write_ocr_md(note, y0, y1, step, segs, nframes)
+
+    research.setdefault("asr_meta", {})["hardsub_ocr"] = {
+        "band": [y0, y1], "step": step, "frames": nframes,
+        "segments": len(segs), "file": str(out.relative_to(note)).replace("\\", "/")}
+    store.save_json(note / "research.json", research)
+    print(f"  {len(segs)} 段字幕 → {out.relative_to(ROOT)}")
+    return 0
+
+
 def _crop_band(src: Path, dest: Path, y0: int, y1: int) -> None:
     from PIL import Image
     img = Image.open(src)
@@ -466,6 +621,12 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--detect", action="store_true", help="只看字幕带位置（无需 OCR 引擎）")
     g.add_argument("--apply", action="store_true", help="用 OCR 校正转写（rapidocr 或 Windows 自带 OCR）")
+    g.add_argument("--subs-ocr", action="store_true",
+                   help="整片字幕带 OCR，产出 evidence/subtitles_ocr.md（参数以字幕为准）")
+    ap.add_argument("--step", type=float, default=2.0, help="--subs-ocr 抽帧步长（秒），默认 2")
+    ap.add_argument("--line", choices=["auto", "top", "bottom", "both"], default="auto",
+                    help="--subs-ocr 读哪一行：auto=有中文就读下行（双语字幕），否则上行")
+    ap.add_argument("--max-secs", type=float, default=0.0, help="--subs-ocr 只跑到第几秒（0=全片）")
     ap.add_argument("--frames", type=int, default=DEFAULT_FRAMES, help="抽样帧数")
     ap.add_argument("--y0", type=int, default=None, help="手动指定字幕带上沿（原分辨率像素）")
     ap.add_argument("--y1", type=int, default=None, help="手动指定字幕带下沿（原分辨率像素）")
@@ -473,6 +634,8 @@ def main() -> int:
     ap.add_argument("--min-cover", type=float, default=0.6, help="覆盖阈值，默认 0.6")
     ap.add_argument("--write", action="store_true", help="写回 research.asr_meta.hardsub")
     args = ap.parse_args()
+    if args.subs_ocr:
+        return cmd_subs_ocr(args)
     if args.apply:
         return cmd_apply(args)
     return cmd_detect(args)
